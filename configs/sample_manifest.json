@@ -1,0 +1,26 @@
+[
+  {
+    "id": "jump_0001_correct",
+    "video_dir": "jump/0001_correct",
+    "skeleton_path": "skeletons/jump_0001_correct.npy",
+    "action_id": 0,
+    "error_labels": [],
+    "is_correct": true
+  },
+  {
+    "id": "jump_0002_knee_valgus",
+    "video_dir": "jump/0002_error",
+    "skeleton_path": "skeletons/jump_0002_knee_valgus.npy",
+    "action_id": 0,
+    "error_labels": [1],
+    "is_correct": false
+  },
+  {
+    "id": "squat_0001_correct",
+    "video_dir": "squat/0001_correct",
+    "skeleton_path": "skeletons/squat_0001_correct.npy",
+    "action_id": 1,
+    "error_labels": [],
+    "is_correct": true
+  }
+]
