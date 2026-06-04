@@ -167,6 +167,7 @@ class SkeletonKinematicEncoder(nn.Module):
                 "Keep dataset and model skeleton_input_dim aligned."
             )
 
+        skeleton = self._normalize_skeleton(skeleton)
         velocity = torch.diff(skeleton, dim=1, prepend=skeleton[:, :1])
         valid = skeleton.abs().sum(dim=-1) > 1e-6
         if has_skeleton is not None:
@@ -196,6 +197,45 @@ class SkeletonKinematicEncoder(nn.Module):
             "joint_valid": valid,
             "joint_coords": skeleton,
         }
+
+    def _normalize_skeleton(self, skeleton: torch.Tensor) -> torch.Tensor:
+        coord_dims = min(2, self.input_dim)
+        if coord_dims <= 0:
+            return skeleton
+
+        coords = skeleton[..., :coord_dims]
+        valid = coords.abs().sum(dim=-1, keepdim=True) > 1e-6
+        root = self._compute_root_center(coords, valid)
+        coords = coords - root
+
+        flattened = coords.norm(dim=-1)
+        flattened = torch.where(valid.squeeze(-1), flattened, torch.zeros_like(flattened))
+        scale = flattened.amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+        coords = coords / scale[:, None]
+        coords = coords * valid.to(dtype=coords.dtype)
+
+        if coord_dims == self.input_dim:
+            return coords
+        return torch.cat([coords, skeleton[..., coord_dims:]], dim=-1)
+
+    def _compute_root_center(self, coords: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        if self.skeleton_layout == "coco17" and self.num_joints >= 13:
+            root_indices = [11, 12]
+        else:
+            root_indices = [0]
+
+        root_coords = coords[:, :, root_indices]
+        root_valid = valid[:, :, root_indices]
+        root_count = root_valid.sum(dim=2, keepdim=False).clamp_min(1.0)
+        root_center = (root_coords * root_valid.to(dtype=coords.dtype)).sum(dim=2) / root_count
+
+        missing_root = root_valid.any(dim=2).logical_not()
+        if missing_root.any():
+            all_valid = valid.sum(dim=2, keepdim=False).clamp_min(1.0)
+            fallback_center = (coords * valid.to(dtype=coords.dtype)).sum(dim=2) / all_valid
+            root_center = torch.where(missing_root, fallback_center, root_center)
+
+        return root_center.unsqueeze(2)
 
 
 class PhaseAwareSkeletonAggregator(nn.Module):
@@ -356,11 +396,11 @@ def cross_modal_alignment_loss(
         )
 
     similarity = F.cosine_similarity(rgb_phase_features, skeleton_phase_features, dim=-1)
-    per_sample = (1.0 - similarity).mean(dim=1)
+    per_sample = (1.0 - similarity).flatten(1).mean(dim=1)
     if has_skeleton is None:
         return per_sample.mean()
 
-    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype)
+    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype, device=per_sample.device)
     if float(mask.sum()) <= 0:
         return per_sample.sum() * 0.0
     return (per_sample * mask).sum() / mask.sum().clamp_min(1.0)

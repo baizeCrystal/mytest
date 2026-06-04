@@ -37,8 +37,6 @@ class PhaseContrastActionErrorModel(nn.Module):
         feature_dim: int = 256,
         backbone: str = "x3d",
         action_slot_repo: str = "",
-        prototype_path: str = "",
-        learnable_prototypes: bool = False,
         freeze_backbone: bool = False,
         train_last_blocks: int = 2,
         phase_temperature: float = 0.08,
@@ -48,16 +46,13 @@ class PhaseContrastActionErrorModel(nn.Module):
         model_variant: str = "kinematic_chain",
         num_part_slots: int = 7,
         part_slot_preset: str = "full_body_7",
-        part_slot_background: bool = False,
         part_slot_prior_strength: float = 2.5,
-        use_correct_prototype_comparator: bool = False,
         use_skeleton: bool = False,
         skeleton_num_joints: int = 17,
         skeleton_input_dim: int = 3,
         skeleton_layout: str = "coco17",
     ):
         super().__init__()
-        del prototype_path, learnable_prototypes, part_slot_background, use_correct_prototype_comparator
 
         self.num_actions = int(num_actions)
         self.num_error_classes = int(num_error_classes)
@@ -65,9 +60,12 @@ class PhaseContrastActionErrorModel(nn.Module):
         self.feature_dim = int(feature_dim)
         self.backbone_name = str(backbone)
         self.model_variant = str(model_variant)
+        if self.model_variant not in {"kinematic_chain", "part_slot"}:
+            raise ValueError(f"Unsupported model_variant: {self.model_variant}")
         self.num_part_slots = int(num_part_slots)
         self.part_slot_preset = str(part_slot_preset)
         self.use_skeleton = bool(use_skeleton)
+        self.use_kinematic_chain = bool(self.use_skeleton and self.model_variant == "kinematic_chain")
         self.skeleton_num_joints = int(skeleton_num_joints)
         self.skeleton_input_dim = int(skeleton_input_dim)
         self.skeleton_layout = str(skeleton_layout)
@@ -128,12 +126,13 @@ class PhaseContrastActionErrorModel(nn.Module):
                 slot_preset=self.part_slot_preset,
                 skeleton_layout=self.skeleton_layout,
             )
-            self.kinematic_reasoner = KinematicChainReasoner(
-                feature_dim=self.feature_dim,
-                num_parts=self.num_part_slots,
-                coord_dim=self.skeleton_input_dim,
-                slot_preset=self.part_slot_preset,
-            )
+            if self.use_kinematic_chain:
+                self.kinematic_reasoner = KinematicChainReasoner(
+                    feature_dim=self.feature_dim,
+                    num_parts=self.num_part_slots,
+                    coord_dim=self.skeleton_input_dim,
+                    slot_preset=self.part_slot_preset,
+                )
             self.temporal_multimodal_proj = nn.Sequential(
                 nn.LayerNorm(self.feature_dim * 2),
                 nn.Linear(self.feature_dim * 2, self.feature_dim),
@@ -152,7 +151,12 @@ class PhaseContrastActionErrorModel(nn.Module):
                 nn.Linear(self.feature_dim, self.feature_dim),
             )
 
-        phase_context_dim = self.feature_dim * (7 if self.use_skeleton else 3)
+        if self.use_kinematic_chain:
+            phase_context_dim = self.feature_dim * 7
+        elif self.use_skeleton:
+            phase_context_dim = self.feature_dim * 5
+        else:
+            phase_context_dim = self.feature_dim * 3
         self.phase_error_head = nn.Sequential(
             nn.LayerNorm(phase_context_dim),
             nn.Linear(phase_context_dim, self.feature_dim),
@@ -279,6 +283,22 @@ class PhaseContrastActionErrorModel(nn.Module):
             )
             cross_modal_features = cross_modal_features * mask
 
+        if not self.use_kinematic_chain:
+            phase_context = torch.cat(
+                [
+                    phase_features,
+                    phase_part_features,
+                    skeleton_outputs["phase_skeleton_part_features"],
+                    torch.abs(phase_part_features - skeleton_outputs["phase_skeleton_part_features"]),
+                    cross_modal_features,
+                ],
+                dim=-1,
+            )
+            outputs.update(skeleton_outputs)
+            outputs["cross_modal_features"] = cross_modal_features
+            outputs["phase_context"] = phase_context
+            return outputs
+
         phase_context = torch.cat(
             [
                 phase_features,
@@ -374,7 +394,6 @@ class PhaseContrastActionErrorModel(nn.Module):
         phase_targets=None,
         phase_loss_weight: float = 0.0,
         phase_duration_weight: float = 0.0,
-        compactness_weight: float = 0.0,
         part_diversity_weight: float = 0.0,
         part_entropy_weight: float = 0.0,
         part_consistency_weight: float = 0.0,
@@ -385,16 +404,13 @@ class PhaseContrastActionErrorModel(nn.Module):
     ):
         del phase_targets
 
-        if kinematic_length_weight <= 0.0 and compactness_weight > 0.0:
-            kinematic_length_weight = float(compactness_weight)
-
         losses = {}
         losses["error"] = F.binary_cross_entropy_with_logits(outputs["logits"], error_targets)
         total = losses["error"]
 
         if phase_loss_weight > 0:
-            phase_probs = torch.sigmoid(outputs["phase_logits"]).clamp(1e-6, 1.0 - 1e-6)
-            aggregated_probs = 1.0 - torch.prod(1.0 - phase_probs, dim=1)
+            phase_probs = torch.sigmoid(outputs["phase_logits"])
+            aggregated_probs = phase_probs.max(dim=1).values
             losses["phase_aggregate"] = F.binary_cross_entropy(aggregated_probs, error_targets)
             total = total + phase_loss_weight * losses["phase_aggregate"]
 
@@ -426,13 +442,13 @@ class PhaseContrastActionErrorModel(nn.Module):
                 total = total + skeleton_smoothness_weight * smoothness
             if cross_modal_alignment_weight > 0:
                 alignment = cross_modal_alignment_loss(
-                    outputs["phase_part_features"],
-                    outputs["phase_skeleton_part_features"],
+                    outputs["part_tokens"],
+                    outputs["phase_skeleton_part_tokens"],
                     has_skeleton=outputs.get("has_skeleton"),
                 )
                 losses["cross_modal_alignment"] = alignment
                 total = total + cross_modal_alignment_weight * alignment
-            if kinematic_length_weight > 0:
+            if self.use_kinematic_chain and kinematic_length_weight > 0:
                 length_reg = kinematic_chain_length_loss(
                     outputs["phase_skeleton_part_coords"],
                     self.kinematic_reasoner.get_edge_index().to(outputs["phase_skeleton_part_coords"].device),
@@ -440,7 +456,7 @@ class PhaseContrastActionErrorModel(nn.Module):
                 )
                 losses["kinematic_length"] = length_reg
                 total = total + kinematic_length_weight * length_reg
-            if kinematic_symmetry_weight > 0:
+            if self.use_kinematic_chain and kinematic_symmetry_weight > 0:
                 symmetry_reg = kinematic_chain_symmetry_loss(
                     outputs["phase_skeleton_part_velocity"],
                     self.kinematic_reasoner.get_symmetry_pairs(),

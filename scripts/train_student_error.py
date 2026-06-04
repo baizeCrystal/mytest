@@ -38,11 +38,9 @@ def parse_args():
         "--model_variant",
         type=str,
         default="kinematic_chain",
-        choices=["kinematic_chain", "part_slot", "prototype", "part_prototype"],
+        choices=["kinematic_chain", "part_slot"],
     )
     parser.add_argument("--no_pretrained_backbone", action="store_true")
-    parser.add_argument("--prototype_path", type=str, default="")
-    parser.add_argument("--learnable_prototypes", action="store_true")
     parser.add_argument("--num_part_slots", type=int, default=7)
     parser.add_argument(
         "--part_slot_preset",
@@ -51,9 +49,6 @@ def parse_args():
         choices=["lower_body_6", "full_body_7", "custom"],
     )
     parser.add_argument("--part_slot_prior_strength", type=float, default=2.5)
-    parser.add_argument("--part_slot_background", action="store_true")
-    parser.add_argument("--use_correct_prototype_comparator", action="store_true")
-    parser.add_argument("--prototype_update_momentum", type=float, default=0.9)
     parser.add_argument("--use_skeleton", action="store_true")
     parser.add_argument("--skeleton_root", type=str, default="")
     parser.add_argument("--skeleton_layout", type=str, default="coco17")
@@ -77,7 +72,6 @@ def parse_args():
     parser.add_argument("--wd", type=float, default=1e-2)
     parser.add_argument("--phase_loss_weight", type=float, default=0.25)
     parser.add_argument("--phase_duration_weight", type=float, default=0.05)
-    parser.add_argument("--compactness_weight", type=float, default=0.0)
     parser.add_argument("--part_diversity_weight", type=float, default=0.0)
     parser.add_argument("--part_entropy_weight", type=float, default=0.0)
     parser.add_argument("--part_consistency_weight", type=float, default=0.0)
@@ -301,7 +295,7 @@ def build_dataset(args, manifest, split):
             (split == "train")
             and (not args.disable_hflip)
             and (not args.use_skeleton)
-            and args.model_variant not in {"part_slot", "part_prototype", "kinematic_chain"}
+            and args.model_variant not in {"part_slot", "kinematic_chain"}
         ),
         use_skeleton=args.use_skeleton,
         skeleton_root=args.skeleton_root,
@@ -320,8 +314,6 @@ def build_model(args):
         feature_dim=args.feature_dim,
         backbone=args.backbone,
         action_slot_repo=args.action_slot_repo,
-        prototype_path=args.prototype_path,
-        learnable_prototypes=args.learnable_prototypes or not args.prototype_path,
         freeze_backbone=args.freeze_backbone,
         train_last_blocks=args.train_last_blocks,
         phase_temperature=args.phase_temperature,
@@ -330,9 +322,7 @@ def build_model(args):
         model_variant=args.model_variant,
         num_part_slots=args.num_part_slots,
         part_slot_preset=args.part_slot_preset,
-        part_slot_background=args.part_slot_background,
         part_slot_prior_strength=args.part_slot_prior_strength,
-        use_correct_prototype_comparator=args.use_correct_prototype_comparator,
         use_skeleton=args.use_skeleton,
         skeleton_num_joints=args.skeleton_num_joints,
         skeleton_input_dim=args.skeleton_input_dim,
@@ -390,7 +380,6 @@ def run_epoch(model, loader, optimizer, scaler, args, train=True, epoch=0):
                     phase_targets=phase,
                     phase_loss_weight=args.phase_loss_weight,
                     phase_duration_weight=args.phase_duration_weight,
-                    compactness_weight=args.compactness_weight,
                     part_diversity_weight=args.part_diversity_weight,
                     part_entropy_weight=args.part_entropy_weight,
                     part_consistency_weight=args.part_consistency_weight,
