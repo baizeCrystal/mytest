@@ -151,16 +151,9 @@ class KinematicChainReasoner(nn.Module):
         self.register_buffer("chain_incidence", incidence, persistent=False)
         self.register_buffer("chain_edge_index", edge_index, persistent=False)
 
-        node_input_dim = self.feature_dim * 2
         motion_input_dim = self.coord_dim * 2 + 1
         edge_input_dim = self.coord_dim * 2 + 2
 
-        self.node_fusion = nn.Sequential(
-            nn.LayerNorm(node_input_dim),
-            nn.Linear(node_input_dim, self.feature_dim),
-            nn.GELU(),
-            nn.Linear(self.feature_dim, self.feature_dim),
-        )
         self.motion_proj = nn.Sequential(
             nn.LayerNorm(motion_input_dim),
             nn.Linear(motion_input_dim, self.feature_dim),
@@ -184,22 +177,15 @@ class KinematicChainReasoner(nn.Module):
     def forward(
         self,
         rgb_part_tokens: torch.Tensor,
-        skeleton_part_tokens: torch.Tensor,
         part_coords: torch.Tensor,
         part_velocity: torch.Tensor,
         has_skeleton: Optional[torch.Tensor] = None,
     ):
         if rgb_part_tokens.ndim != 4:
             raise ValueError(f"Expected rgb part tokens [B, K, P, C], got {tuple(rgb_part_tokens.shape)}")
-        if skeleton_part_tokens.shape != rgb_part_tokens.shape:
-            raise ValueError(
-                "RGB and skeleton part tokens must share the same shape, got "
-                f"{tuple(rgb_part_tokens.shape)} and {tuple(skeleton_part_tokens.shape)}"
-            )
 
         speed = torch.linalg.norm(part_velocity, dim=-1, keepdim=True)
-        node_features = self.node_fusion(torch.cat([rgb_part_tokens, skeleton_part_tokens], dim=-1))
-        node_features = node_features + self.motion_proj(torch.cat([part_coords, part_velocity, speed], dim=-1))
+        node_features = rgb_part_tokens + self.motion_proj(torch.cat([part_coords, part_velocity, speed], dim=-1))
 
         src_idx = self.chain_edge_index[:, 0]
         dst_idx = self.chain_edge_index[:, 1]

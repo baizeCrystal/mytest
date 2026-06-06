@@ -76,7 +76,6 @@ def parse_args():
     parser.add_argument("--part_entropy_weight", type=float, default=0.0)
     parser.add_argument("--part_consistency_weight", type=float, default=0.0)
     parser.add_argument("--skeleton_smoothness_weight", type=float, default=0.0)
-    parser.add_argument("--cross_modal_alignment_weight", type=float, default=0.0)
     parser.add_argument("--kinematic_length_weight", type=float, default=0.0)
     parser.add_argument("--kinematic_symmetry_weight", type=float, default=0.0)
     parser.add_argument("--freeze_backbone", action="store_true")
@@ -281,6 +280,7 @@ def move_skeleton(skeleton, device):
 
 
 def build_dataset(args, manifest, split):
+    skeleton_enabled = bool(args.use_skeleton and args.model_variant == "kinematic_chain")
     return StudentActionDataset(
         manifest_path=manifest,
         data_root=args.data_root,
@@ -294,19 +294,20 @@ def build_dataset(args, manifest, split):
         enable_hflip=(
             (split == "train")
             and (not args.disable_hflip)
-            and (not args.use_skeleton)
+            and (not skeleton_enabled)
             and args.model_variant not in {"part_slot", "kinematic_chain"}
         ),
-        use_skeleton=args.use_skeleton,
+        use_skeleton=skeleton_enabled,
         skeleton_root=args.skeleton_root,
         skeleton_layout=args.skeleton_layout,
         skeleton_num_joints=args.skeleton_num_joints,
         skeleton_input_dim=args.skeleton_input_dim,
-        skeleton_required=args.skeleton_required,
+        skeleton_required=bool(args.skeleton_required and skeleton_enabled),
     )
 
 
 def build_model(args):
+    skeleton_enabled = bool(args.use_skeleton and args.model_variant == "kinematic_chain")
     return PhaseContrastActionErrorModel(
         num_actions=args.num_actions,
         num_error_classes=args.num_error_classes,
@@ -323,7 +324,7 @@ def build_model(args):
         num_part_slots=args.num_part_slots,
         part_slot_preset=args.part_slot_preset,
         part_slot_prior_strength=args.part_slot_prior_strength,
-        use_skeleton=args.use_skeleton,
+        use_skeleton=skeleton_enabled,
         skeleton_num_joints=args.skeleton_num_joints,
         skeleton_input_dim=args.skeleton_input_dim,
         skeleton_layout=args.skeleton_layout,
@@ -384,7 +385,6 @@ def run_epoch(model, loader, optimizer, scaler, args, train=True, epoch=0):
                     part_entropy_weight=args.part_entropy_weight,
                     part_consistency_weight=args.part_consistency_weight,
                     skeleton_smoothness_weight=args.skeleton_smoothness_weight,
-                    cross_modal_alignment_weight=args.cross_modal_alignment_weight,
                     kinematic_length_weight=args.kinematic_length_weight,
                     kinematic_symmetry_weight=args.kinematic_symmetry_weight,
                 )

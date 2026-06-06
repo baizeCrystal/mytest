@@ -98,17 +98,18 @@ python scripts/train_student_error.py \
   --num_actions 4 \
   --num_error_classes 8 \
   --num_phases 4 \
-  --model_variant part_slot \
+  --model_variant kinematic_chain \
   --num_part_slots 7 \
   --skeleton_smoothness_weight 0.01 \
-  --cross_modal_alignment_weight 0.05 \
+  --kinematic_length_weight 0.05 \
+  --kinematic_symmetry_weight 0.05 \
   --batch_size 8 \
   --epochs 50 \
   --amp \
   --logdir outputs/student_error_rgb_skeleton
 ```
 
-When `--use_skeleton` is enabled, the trainer reads `skeleton_path` from the manifest. If a sample has no skeleton file and `--skeleton_required` is not set, the model falls back to a zero skeleton tensor for that sample so the RGB path can still run.
+When `--use_skeleton` is enabled together with `--model_variant kinematic_chain`, the trainer reads `skeleton_path` from the manifest. If a sample has no skeleton file and `--skeleton_required` is not set, the model falls back to a zero skeleton tensor for that sample so the RGB path can still run. In the current design, skeletons do not participate in early phase encoding; they are injected only at the late kinematic-chain reasoning stage as motion evidence.
 
 ### Prototype variant
 

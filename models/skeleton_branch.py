@@ -2,7 +2,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 COCO17_EDGES: Tuple[Tuple[int, int], ...] = (
@@ -272,12 +271,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         )
         self.register_buffer("part_pool", part_pool, persistent=False)
 
-        self.part_proj = nn.Linear(self.num_part_slots * self.feature_dim, self.feature_dim)
-        self.part_gate = nn.Sequential(
-            nn.LayerNorm(self.feature_dim),
-            nn.Linear(self.feature_dim, self.feature_dim),
-            nn.Sigmoid(),
-        )
         motion_input_dim = self.num_part_slots * self.input_dim * 2
         self.motion_proj = nn.Sequential(
             nn.LayerNorm(motion_input_dim),
@@ -305,26 +298,17 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         )
 
         phase_pool = phase_weights / phase_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        phase_temporal_features = torch.einsum("bkt,btc->bkc", phase_pool, encoded["temporal_features"])
         phase_part_tokens = torch.einsum("bkt,btpc->bkpc", phase_pool, part_features)
         phase_part_coords = torch.einsum("bkt,btpd->bkpd", phase_pool, part_coords)
         phase_part_velocity = torch.einsum("bkt,btpd->bkpd", phase_pool, part_velocity)
 
-        projected_parts = self.part_proj(phase_part_tokens.flatten(2))
-        gated_parts = self.part_gate(projected_parts) * projected_parts
-        phase_part_features = phase_part_tokens.mean(dim=2) + gated_parts
-
         motion_input = torch.cat([phase_part_coords, phase_part_velocity], dim=-1).flatten(2)
         phase_motion_features = self.motion_proj(motion_input)
-        phase_skeleton_features = phase_temporal_features + phase_part_features + phase_motion_features
 
         if has_skeleton is not None:
-            mask = has_skeleton.view(-1, 1, 1).to(dtype=phase_skeleton_features.dtype)
-            phase_temporal_features = phase_temporal_features * mask
+            mask = has_skeleton.view(-1, 1, 1).to(dtype=phase_motion_features.dtype)
             phase_part_tokens = phase_part_tokens * mask.unsqueeze(2)
-            phase_part_features = phase_part_features * mask
             phase_motion_features = phase_motion_features * mask
-            phase_skeleton_features = phase_skeleton_features * mask
             phase_part_coords = phase_part_coords * mask.unsqueeze(-1)
             phase_part_velocity = phase_part_velocity * mask.unsqueeze(-1)
 
@@ -333,16 +317,9 @@ class PhaseAwareSkeletonAggregator(nn.Module):
             "skeleton_temporal_features": encoded["temporal_features"],
             "skeleton_joint_velocity": encoded["joint_velocity"],
             "skeleton_joint_valid": encoded["joint_valid"],
-            "skeleton_part_features": part_features,
-            "skeleton_part_coords": part_coords,
-            "skeleton_part_velocity": part_velocity,
-            "phase_skeleton_temporal_features": phase_temporal_features,
-            "phase_skeleton_part_tokens": phase_part_tokens,
-            "phase_skeleton_part_features": phase_part_features,
             "phase_skeleton_part_coords": phase_part_coords,
             "phase_skeleton_part_velocity": phase_part_velocity,
             "phase_skeleton_motion_features": phase_motion_features,
-            "phase_skeleton_features": phase_skeleton_features,
         }
         return outputs
 
@@ -379,28 +356,6 @@ def skeleton_temporal_smoothness_loss(
         return per_sample.mean()
 
     mask = has_skeleton.view(-1).to(dtype=per_sample.dtype)
-    if float(mask.sum()) <= 0:
-        return per_sample.sum() * 0.0
-    return (per_sample * mask).sum() / mask.sum().clamp_min(1.0)
-
-
-def cross_modal_alignment_loss(
-    rgb_phase_features: torch.Tensor,
-    skeleton_phase_features: torch.Tensor,
-    has_skeleton: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if rgb_phase_features.shape != skeleton_phase_features.shape:
-        raise ValueError(
-            "Cross-modal alignment expects the same tensor shape, got "
-            f"{tuple(rgb_phase_features.shape)} and {tuple(skeleton_phase_features.shape)}"
-        )
-
-    similarity = F.cosine_similarity(rgb_phase_features, skeleton_phase_features, dim=-1)
-    per_sample = (1.0 - similarity).flatten(1).mean(dim=1)
-    if has_skeleton is None:
-        return per_sample.mean()
-
-    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype, device=per_sample.device)
     if float(mask.sum()) <= 0:
         return per_sample.sum() * 0.0
     return (per_sample * mask).sum() / mask.sum().clamp_min(1.0)
