@@ -115,7 +115,6 @@ class PhaseContrastActionErrorModel(nn.Module):
 
         if self.use_skeleton:
             self.skeleton_aggregator = PhaseAwareSkeletonAggregator(
-                feature_dim=self.feature_dim,
                 num_phases=self.num_phases,
                 num_joints=self.skeleton_num_joints,
                 input_dim=self.skeleton_input_dim,

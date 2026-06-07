@@ -140,7 +140,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
 
     def __init__(
         self,
-        feature_dim: int,
         num_phases: int,
         num_joints: int = 17,
         input_dim: int = 3,
@@ -149,7 +148,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         skeleton_layout: str = "coco17",
     ):
         super().__init__()
-        self.feature_dim = int(feature_dim)
         self.num_phases = int(num_phases)
         self.num_joints = int(num_joints)
         self.input_dim = int(input_dim)
