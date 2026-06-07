@@ -70,7 +70,6 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--wd", type=float, default=1e-2)
-    parser.add_argument("--phase_loss_weight", type=float, default=0.25)
     parser.add_argument("--phase_duration_weight", type=float, default=0.05)
     parser.add_argument("--part_diversity_weight", type=float, default=0.0)
     parser.add_argument("--part_entropy_weight", type=float, default=0.0)
@@ -379,7 +378,6 @@ def run_epoch(model, loader, optimizer, scaler, args, train=True, epoch=0):
                     outputs,
                     error_targets=error,
                     phase_targets=phase,
-                    phase_loss_weight=args.phase_loss_weight,
                     phase_duration_weight=args.phase_duration_weight,
                     part_diversity_weight=args.part_diversity_weight,
                     part_entropy_weight=args.part_entropy_weight,

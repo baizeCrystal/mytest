@@ -132,7 +132,7 @@ class PhaseContrastActionErrorModel(nn.Module):
                 )
 
         if self.use_kinematic_chain:
-            phase_context_dim = self.feature_dim * 3
+            phase_context_dim = self.feature_dim * 2
         else:
             phase_context_dim = self.feature_dim * 3
         self.phase_error_head = nn.Sequential(
@@ -239,7 +239,6 @@ class PhaseContrastActionErrorModel(nn.Module):
         phase_context = torch.cat(
             [
                 phase_part_features,
-                skeleton_outputs["phase_skeleton_motion_features"],
                 kinematic_outputs["phase_kinematic_features"],
             ],
             dim=-1,
@@ -313,7 +312,6 @@ class PhaseContrastActionErrorModel(nn.Module):
         outputs,
         error_targets,
         phase_targets=None,
-        phase_loss_weight: float = 0.0,
         phase_duration_weight: float = 0.0,
         part_diversity_weight: float = 0.0,
         part_entropy_weight: float = 0.0,
@@ -327,12 +325,6 @@ class PhaseContrastActionErrorModel(nn.Module):
         losses = {}
         losses["error"] = F.binary_cross_entropy_with_logits(outputs["logits"], error_targets)
         total = losses["error"]
-
-        if phase_loss_weight > 0:
-            phase_probs = torch.sigmoid(outputs["phase_logits"])
-            aggregated_probs = phase_probs.max(dim=1).values
-            losses["phase_aggregate"] = F.binary_cross_entropy(aggregated_probs, error_targets)
-            total = total + phase_loss_weight * losses["phase_aggregate"]
 
         if phase_duration_weight > 0:
             duration_reg = phase_duration_regularization(outputs["phase_durations"])

@@ -1,28 +1,7 @@
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-
-
-COCO17_EDGES: Tuple[Tuple[int, int], ...] = (
-    (0, 1),
-    (0, 2),
-    (1, 3),
-    (2, 4),
-    (0, 5),
-    (0, 6),
-    (5, 7),
-    (7, 9),
-    (6, 8),
-    (8, 10),
-    (5, 11),
-    (6, 12),
-    (11, 12),
-    (11, 13),
-    (13, 15),
-    (12, 14),
-    (14, 16),
-)
 
 
 SKELETON_PART_GROUPS: Dict[str, Dict[str, List[List[int]]]] = {
@@ -46,22 +25,6 @@ SKELETON_PART_GROUPS: Dict[str, Dict[str, List[List[int]]]] = {
         ],
     }
 }
-
-
-def build_skeleton_adjacency(num_joints: int, layout: str = "coco17") -> torch.Tensor:
-    adjacency = torch.eye(num_joints, dtype=torch.float32)
-    if layout == "coco17" and num_joints >= 17:
-        edges = COCO17_EDGES
-    else:
-        edges = tuple((idx, idx + 1) for idx in range(max(num_joints - 1, 0)))
-
-    for src, dst in edges:
-        if 0 <= src < num_joints and 0 <= dst < num_joints:
-            adjacency[src, dst] = 1.0
-            adjacency[dst, src] = 1.0
-
-    degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
-    return adjacency / degree
 
 
 def build_part_pool_map(
@@ -91,70 +54,23 @@ def build_part_pool_map(
     return pool
 
 
-class KinematicGraphBlock(nn.Module):
-    def __init__(self, feature_dim: int, dropout: float = 0.1):
-        super().__init__()
-        self.self_proj = nn.Linear(feature_dim, feature_dim)
-        self.neigh_proj = nn.Linear(feature_dim, feature_dim)
-        self.norm1 = nn.LayerNorm(feature_dim)
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(feature_dim),
-            nn.Linear(feature_dim, feature_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(feature_dim * 2, feature_dim),
-        )
-
-    def forward(self, joint_features: torch.Tensor, adjacency: torch.Tensor) -> torch.Tensor:
-        neighbor_context = torch.einsum("ij,btjc->btic", adjacency, joint_features)
-        joint_features = joint_features + self.self_proj(joint_features) + self.neigh_proj(neighbor_context)
-        joint_features = self.norm1(joint_features)
-        joint_features = joint_features + self.ffn(joint_features)
-        return joint_features
-
-
 class SkeletonKinematicEncoder(nn.Module):
+    """Pure kinematic encoder that returns only normalized coordinates and velocity."""
+
     def __init__(
         self,
-        feature_dim: int,
         num_joints: int = 17,
         input_dim: int = 3,
         skeleton_layout: str = "coco17",
-        num_graph_layers: int = 2,
     ):
         super().__init__()
-        self.feature_dim = int(feature_dim)
         self.num_joints = int(num_joints)
         self.input_dim = int(input_dim)
         self.skeleton_layout = str(skeleton_layout)
 
-        fused_input_dim = self.input_dim * 2 + 1
-        self.input_proj = nn.Sequential(
-            nn.LayerNorm(fused_input_dim),
-            nn.Linear(fused_input_dim, self.feature_dim),
-            nn.GELU(),
-            nn.Linear(self.feature_dim, self.feature_dim),
-        )
-        self.graph_blocks = nn.ModuleList(
-            [KinematicGraphBlock(self.feature_dim) for _ in range(max(1, int(num_graph_layers)))]
-        )
-        self.temporal_conv = nn.Sequential(
-            nn.Conv1d(self.feature_dim, self.feature_dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm1d(self.feature_dim),
-            nn.GELU(),
-            nn.Conv1d(self.feature_dim, self.feature_dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm1d(self.feature_dim),
-            nn.GELU(),
-        )
-
-        adjacency = build_skeleton_adjacency(self.num_joints, layout=self.skeleton_layout)
-        self.register_buffer("adjacency", adjacency, persistent=False)
-
     def forward(self, skeleton: torch.Tensor, has_skeleton: Optional[torch.Tensor] = None):
         if skeleton.ndim != 4:
             raise ValueError(f"Expected skeleton [B, T, J, C], got {tuple(skeleton.shape)}")
-
-        skeleton = torch.nan_to_num(skeleton, nan=0.0, posinf=0.0, neginf=0.0)
         if skeleton.shape[2] != self.num_joints:
             raise ValueError(
                 f"Expected {self.num_joints} skeleton joints, got {skeleton.shape[2]}. "
@@ -166,32 +82,14 @@ class SkeletonKinematicEncoder(nn.Module):
                 "Keep dataset and model skeleton_input_dim aligned."
             )
 
+        skeleton = torch.nan_to_num(skeleton, nan=0.0, posinf=0.0, neginf=0.0)
         skeleton = self._normalize_skeleton(skeleton)
         velocity = torch.diff(skeleton, dim=1, prepend=skeleton[:, :1])
         valid = skeleton.abs().sum(dim=-1) > 1e-6
         if has_skeleton is not None:
-            has_skeleton = has_skeleton.view(-1, 1, 1).bool()
-            valid = valid & has_skeleton
-
-        encoder_input = torch.cat(
-            [skeleton, velocity, valid.unsqueeze(-1).to(dtype=skeleton.dtype)],
-            dim=-1,
-        )
-        joint_features = self.input_proj(encoder_input)
-        joint_features = joint_features * valid.unsqueeze(-1).to(dtype=joint_features.dtype)
-
-        adjacency = self.adjacency.to(device=joint_features.device, dtype=joint_features.dtype)
-        for block in self.graph_blocks:
-            joint_features = block(joint_features, adjacency)
-            joint_features = joint_features * valid.unsqueeze(-1).to(dtype=joint_features.dtype)
-
-        temporal_features = joint_features.mean(dim=2)
-        temporal_update = self.temporal_conv(temporal_features.transpose(1, 2)).transpose(1, 2)
-        temporal_features = temporal_features + temporal_update
+            valid = valid & has_skeleton.view(-1, 1, 1).bool()
 
         return {
-            "joint_features": joint_features,
-            "temporal_features": temporal_features,
             "joint_velocity": velocity,
             "joint_valid": valid,
             "joint_coords": skeleton,
@@ -238,6 +136,8 @@ class SkeletonKinematicEncoder(nn.Module):
 
 
 class PhaseAwareSkeletonAggregator(nn.Module):
+    """Pool raw kinematic quantities into RGB-defined temporal phases and body parts."""
+
     def __init__(
         self,
         feature_dim: int,
@@ -258,7 +158,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         self.skeleton_layout = str(skeleton_layout)
 
         self.encoder = SkeletonKinematicEncoder(
-            feature_dim=self.feature_dim,
             num_joints=self.num_joints,
             input_dim=self.input_dim,
             skeleton_layout=self.skeleton_layout,
@@ -271,14 +170,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         )
         self.register_buffer("part_pool", part_pool, persistent=False)
 
-        motion_input_dim = self.num_part_slots * self.input_dim * 2
-        self.motion_proj = nn.Sequential(
-            nn.LayerNorm(motion_input_dim),
-            nn.Linear(motion_input_dim, self.feature_dim),
-            nn.GELU(),
-            nn.Linear(self.feature_dim, self.feature_dim),
-        )
-
     def forward(
         self,
         skeleton: torch.Tensor,
@@ -290,55 +181,42 @@ class PhaseAwareSkeletonAggregator(nn.Module):
             raise ValueError(f"Expected phase weights [B, K, T], got {tuple(phase_weights.shape)}")
 
         encoded = self.encoder(skeleton, has_skeleton=has_skeleton) if encoded is None else encoded
-        part_features, part_coords, part_velocity = self._pool_parts(
-            joint_features=encoded["joint_features"],
+        part_coords, part_velocity = self._pool_parts(
             joint_coords=encoded["joint_coords"],
             joint_velocity=encoded["joint_velocity"],
             joint_valid=encoded["joint_valid"],
         )
 
         phase_pool = phase_weights / phase_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        phase_part_tokens = torch.einsum("bkt,btpc->bkpc", phase_pool, part_features)
         phase_part_coords = torch.einsum("bkt,btpd->bkpd", phase_pool, part_coords)
         phase_part_velocity = torch.einsum("bkt,btpd->bkpd", phase_pool, part_velocity)
 
-        motion_input = torch.cat([phase_part_coords, phase_part_velocity], dim=-1).flatten(2)
-        phase_motion_features = self.motion_proj(motion_input)
-
         if has_skeleton is not None:
-            mask = has_skeleton.view(-1, 1, 1).to(dtype=phase_motion_features.dtype)
-            phase_part_tokens = phase_part_tokens * mask.unsqueeze(2)
-            phase_motion_features = phase_motion_features * mask
+            mask = has_skeleton.view(-1, 1, 1).to(dtype=phase_part_coords.dtype)
             phase_part_coords = phase_part_coords * mask.unsqueeze(-1)
             phase_part_velocity = phase_part_velocity * mask.unsqueeze(-1)
 
-        outputs = {
-            "skeleton_joint_features": encoded["joint_features"],
-            "skeleton_temporal_features": encoded["temporal_features"],
+        return {
             "skeleton_joint_velocity": encoded["joint_velocity"],
             "skeleton_joint_valid": encoded["joint_valid"],
             "phase_skeleton_part_coords": phase_part_coords,
             "phase_skeleton_part_velocity": phase_part_velocity,
-            "phase_skeleton_motion_features": phase_motion_features,
         }
-        return outputs
 
     def _pool_parts(
         self,
-        joint_features: torch.Tensor,
         joint_coords: torch.Tensor,
         joint_velocity: torch.Tensor,
         joint_valid: torch.Tensor,
-    ):
-        part_pool = self.part_pool.to(device=joint_features.device, dtype=joint_features.dtype)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        part_pool = self.part_pool.to(device=joint_coords.device, dtype=joint_coords.dtype)
         weights = part_pool.view(1, 1, self.num_part_slots, self.num_joints)
-        valid_weights = weights * joint_valid.unsqueeze(2).to(dtype=joint_features.dtype)
+        valid_weights = weights * joint_valid.unsqueeze(2).to(dtype=joint_coords.dtype)
         valid_weights = valid_weights / valid_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
-        part_features = torch.einsum("btpj,btjc->btpc", valid_weights, joint_features)
         part_coords = torch.einsum("btpj,btjd->btpd", valid_weights, joint_coords)
         part_velocity = torch.einsum("btpj,btjd->btpd", valid_weights, joint_velocity)
-        return part_features, part_coords, part_velocity
+        return part_coords, part_velocity
 
 
 def skeleton_temporal_smoothness_loss(
@@ -355,7 +233,7 @@ def skeleton_temporal_smoothness_loss(
     if has_skeleton is None:
         return per_sample.mean()
 
-    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype)
+    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype, device=per_sample.device)
     if float(mask.sum()) <= 0:
         return per_sample.sum() * 0.0
     return (per_sample * mask).sum() / mask.sum().clamp_min(1.0)

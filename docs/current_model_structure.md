@@ -84,15 +84,13 @@ Instead, after RGB phases are produced, skeleton is aligned to these RGB phases 
 2. joint velocity computation
 3. joint-to-body-part pooling
 4. phase-wise pooling with RGB phase masks
-5. motion feature projection
 
 It outputs:
 
 - `phase_skeleton_part_coords`: phase-wise part coordinates, shape `B x K x P x D`
 - `phase_skeleton_part_velocity`: phase-wise part velocities, shape `B x K x P x D`
-- `phase_skeleton_motion_features`: projected motion evidence, shape `B x K x C`
 
-Important: the skeleton branch no longer provides an independent semantic token stream for classification. Its role is only to provide motion evidence.
+Important: the skeleton branch is now parameter-free and no longer provides an independent semantic feature stream. It only supplies normalized kinematic quantities.
 
 ### 5. Kinematic Chain Reasoning
 
@@ -132,10 +130,9 @@ The final phase representation is intentionally compact.
 Current phase context is:
 
 - `phase_part_features`
-- `phase_skeleton_motion_features`
 - `phase_kinematic_features`
 
-These are concatenated into a tensor of shape `B x K x 3C`, then passed to `phase_error_head`.
+These are concatenated into a tensor of shape `B x K x 2C`, then passed to `phase_error_head`.
 
 The model outputs:
 
@@ -164,8 +161,6 @@ This keeps the decision logic simple and consistent with weak video-level superv
 
 ### Optional Auxiliary Losses
 
-- `phase_aggregate`
-  - binary cross-entropy on max-pooled phase probabilities
 - `phase_duration`
   - regularizes phase durations to avoid collapse
 - `part_diversity`
@@ -214,6 +209,6 @@ Using phase logits plus MIL aggregation is simpler, more interpretable, and bett
 
 The current model can be summarized as:
 
-`RGB Backbone -> Soft Phase Segmentation -> Phase-Aware Body-Part Discovery -> Late Skeleton Motion Pooling -> Kinematic Chain Reasoning -> Phase Error Prediction -> Max-MIL Video Prediction`
+`RGB Backbone -> Soft Phase Segmentation -> Phase-Aware Body-Part Discovery -> Late Skeleton Kinematic Pooling -> Kinematic Chain Reasoning -> Phase Error Prediction -> Max-MIL Video Prediction`
 
 This is the current code-aligned architecture and should be treated as the canonical model description for writing, reporting, and figure generation.
