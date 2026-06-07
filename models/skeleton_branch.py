@@ -1,57 +1,9 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-
-SKELETON_PART_GROUPS: Dict[str, Dict[str, List[List[int]]]] = {
-    "coco17": {
-        "full_body_7": [
-            [0, 1, 2, 3, 4],
-            [5, 6, 11, 12],
-            [5, 7, 9],
-            [6, 8, 10],
-            [11, 13, 15],
-            [12, 14, 16],
-            [15, 16],
-        ],
-        "lower_body_6": [
-            [5, 6, 11, 12],
-            [11, 12],
-            [5, 7, 9],
-            [6, 8, 10],
-            [11, 13, 15],
-            [12, 14, 16],
-        ],
-    }
-}
-
-
-def build_part_pool_map(
-    num_joints: int,
-    num_parts: int,
-    slot_preset: str = "full_body_7",
-    skeleton_layout: str = "coco17",
-) -> torch.Tensor:
-    groups = SKELETON_PART_GROUPS.get(skeleton_layout, {}).get(slot_preset)
-    if groups is None or len(groups) != num_parts:
-        groups = []
-        chunk = max(1, num_joints // max(num_parts, 1))
-        start = 0
-        for part_idx in range(num_parts):
-            end = num_joints if part_idx == num_parts - 1 else min(num_joints, start + chunk)
-            groups.append(list(range(start, max(end, start + 1))))
-            start = end
-
-    pool = torch.zeros(num_parts, num_joints, dtype=torch.float32)
-    for part_idx, joint_ids in enumerate(groups):
-        valid_ids = [joint_id for joint_id in joint_ids if 0 <= joint_id < num_joints]
-        if not valid_ids:
-            valid_ids = [min(part_idx, num_joints - 1)]
-        weight = 1.0 / float(len(valid_ids))
-        for joint_id in valid_ids:
-            pool[part_idx, joint_id] = weight
-    return pool
+from .body_topology import build_part_pool_map
 
 
 class SkeletonKinematicEncoder(nn.Module):
@@ -173,12 +125,21 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         skeleton: torch.Tensor,
         phase_weights: torch.Tensor,
         has_skeleton: Optional[torch.Tensor] = None,
-        encoded: Optional[Dict[str, torch.Tensor]] = None,
     ):
         if phase_weights.ndim != 3:
             raise ValueError(f"Expected phase weights [B, K, T], got {tuple(phase_weights.shape)}")
+        if skeleton.ndim != 4:
+            raise ValueError(f"Expected skeleton [B, T, J, C], got {tuple(skeleton.shape)}")
+        if skeleton.shape[0] != phase_weights.shape[0]:
+            raise ValueError(
+                f"Batch mismatch between skeleton {tuple(skeleton.shape)} and phase weights {tuple(phase_weights.shape)}"
+            )
+        if skeleton.shape[1] != phase_weights.shape[2]:
+            raise ValueError(
+                f"Time mismatch between skeleton {tuple(skeleton.shape)} and phase weights {tuple(phase_weights.shape)}"
+            )
 
-        encoded = self.encoder(skeleton, has_skeleton=has_skeleton) if encoded is None else encoded
+        encoded = self.encoder(skeleton, has_skeleton=has_skeleton)
         part_coords, part_velocity = self._pool_parts(
             joint_coords=encoded["joint_coords"],
             joint_velocity=encoded["joint_velocity"],
@@ -195,8 +156,6 @@ class PhaseAwareSkeletonAggregator(nn.Module):
             phase_part_velocity = phase_part_velocity * mask.unsqueeze(-1)
 
         return {
-            "skeleton_joint_velocity": encoded["joint_velocity"],
-            "skeleton_joint_valid": encoded["joint_valid"],
             "phase_skeleton_part_coords": phase_part_coords,
             "phase_skeleton_part_velocity": phase_part_velocity,
         }
@@ -215,23 +174,3 @@ class PhaseAwareSkeletonAggregator(nn.Module):
         part_coords = torch.einsum("btpj,btjd->btpd", valid_weights, joint_coords)
         part_velocity = torch.einsum("btpj,btjd->btpd", valid_weights, joint_velocity)
         return part_coords, part_velocity
-
-
-def skeleton_temporal_smoothness_loss(
-    joint_velocity: torch.Tensor,
-    has_skeleton: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if joint_velocity.ndim != 4:
-        raise ValueError(f"Expected joint velocity [B, T, J, C], got {tuple(joint_velocity.shape)}")
-    acceleration = torch.diff(joint_velocity, dim=1)
-    if acceleration.numel() == 0:
-        return joint_velocity.sum() * 0.0
-
-    per_sample = acceleration.abs().mean(dim=(1, 2, 3))
-    if has_skeleton is None:
-        return per_sample.mean()
-
-    mask = has_skeleton.view(-1).to(dtype=per_sample.dtype, device=per_sample.device)
-    if float(mask.sum()) <= 0:
-        return per_sample.sum() * 0.0
-    return (per_sample * mask).sum() / mask.sum().clamp_min(1.0)

@@ -71,12 +71,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--wd", type=float, default=1e-2)
     parser.add_argument("--phase_duration_weight", type=float, default=0.05)
-    parser.add_argument("--part_diversity_weight", type=float, default=0.0)
-    parser.add_argument("--part_entropy_weight", type=float, default=0.0)
-    parser.add_argument("--part_consistency_weight", type=float, default=0.0)
-    parser.add_argument("--skeleton_smoothness_weight", type=float, default=0.0)
     parser.add_argument("--kinematic_length_weight", type=float, default=0.0)
-    parser.add_argument("--kinematic_symmetry_weight", type=float, default=0.0)
     parser.add_argument("--freeze_backbone", action="store_true")
     parser.add_argument("--train_last_blocks", type=int, default=2)
     parser.add_argument("--clip_grad_norm", type=float, default=10.0)
@@ -366,8 +361,6 @@ def run_epoch(model, loader, optimizer, scaler, args, train=True, epoch=0):
                 has_skeleton = has_skeleton.to(args.device, non_blocking=True)
             error = batch["error"].to(args.device, dtype=torch.float32, non_blocking=True)
             action_id = batch["action_id"].to(args.device, non_blocking=True)
-            is_correct = batch["is_correct"].to(args.device, non_blocking=True)
-            phase = batch["phase"].to(args.device, non_blocking=True)
 
             if train:
                 optimizer.zero_grad(set_to_none=True)
@@ -377,14 +370,8 @@ def run_epoch(model, loader, optimizer, scaler, args, train=True, epoch=0):
                 loss_dict = model.compute_losses(
                     outputs,
                     error_targets=error,
-                    phase_targets=phase,
                     phase_duration_weight=args.phase_duration_weight,
-                    part_diversity_weight=args.part_diversity_weight,
-                    part_entropy_weight=args.part_entropy_weight,
-                    part_consistency_weight=args.part_consistency_weight,
-                    skeleton_smoothness_weight=args.skeleton_smoothness_weight,
                     kinematic_length_weight=args.kinematic_length_weight,
-                    kinematic_symmetry_weight=args.kinematic_symmetry_weight,
                 )
                 loss = loss_dict["total"]
 

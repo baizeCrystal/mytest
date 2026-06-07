@@ -85,9 +85,8 @@ python scripts/train_student_error.py \
   --num_phases 4 \
   --model_variant kinematic_chain \
   --num_part_slots 7 \
-  --skeleton_smoothness_weight 0.01 \
+  --phase_duration_weight 0.05 \
   --kinematic_length_weight 0.05 \
-  --kinematic_symmetry_weight 0.05 \
   --batch_size 8 \
   --epochs 50 \
   --amp \

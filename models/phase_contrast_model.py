@@ -10,18 +10,9 @@ from .backbones import ActionSlotTemporalBackbone, SimpleCNNTemporalBackbone, X3
 from .kinematic_chain import (
     KinematicChainReasoner,
     kinematic_chain_length_loss,
-    kinematic_chain_symmetry_loss,
 )
-from .part_slot import (
-    PhaseAwarePartPrototypeAggregator,
-    part_slot_consistency_loss,
-    part_slot_diversity_loss,
-    part_slot_entropy_loss,
-)
-from .skeleton_branch import (
-    PhaseAwareSkeletonAggregator,
-    skeleton_temporal_smoothness_loss,
-)
+from .part_slot import PhaseAwarePartPrototypeAggregator
+from .skeleton_branch import PhaseAwareSkeletonAggregator
 from .soft_phase import SoftPhaseAssignment, phase_duration_regularization
 
 
@@ -310,17 +301,9 @@ class PhaseContrastActionErrorModel(nn.Module):
         self,
         outputs,
         error_targets,
-        phase_targets=None,
         phase_duration_weight: float = 0.0,
-        part_diversity_weight: float = 0.0,
-        part_entropy_weight: float = 0.0,
-        part_consistency_weight: float = 0.0,
-        skeleton_smoothness_weight: float = 0.0,
         kinematic_length_weight: float = 0.0,
-        kinematic_symmetry_weight: float = 0.0,
     ):
-        del phase_targets
-
         losses = {}
         losses["error"] = F.binary_cross_entropy_with_logits(outputs["logits"], error_targets)
         total = losses["error"]
@@ -330,43 +313,14 @@ class PhaseContrastActionErrorModel(nn.Module):
             losses["phase_duration"] = duration_reg
             total = total + phase_duration_weight * duration_reg
 
-        if part_diversity_weight > 0:
-            diversity = part_slot_diversity_loss(outputs["part_tokens"])
-            losses["part_diversity"] = diversity
-            total = total + part_diversity_weight * diversity
-        if part_entropy_weight > 0:
-            entropy = part_slot_entropy_loss(outputs["part_attn"])
-            losses["part_entropy"] = entropy
-            total = total + part_entropy_weight * entropy
-        if part_consistency_weight > 0:
-            consistency = part_slot_consistency_loss(outputs["part_attn"])
-            losses["part_consistency"] = consistency
-            total = total + part_consistency_weight * consistency
-
-        if self.use_skeleton and "skeleton_joint_velocity" in outputs:
-            if skeleton_smoothness_weight > 0:
-                smoothness = skeleton_temporal_smoothness_loss(
-                    outputs["skeleton_joint_velocity"],
-                    has_skeleton=outputs.get("has_skeleton"),
-                )
-                losses["skeleton_smoothness"] = smoothness
-                total = total + skeleton_smoothness_weight * smoothness
-            if self.use_kinematic_chain and kinematic_length_weight > 0:
-                length_reg = kinematic_chain_length_loss(
-                    outputs["phase_skeleton_part_coords"],
-                    self.kinematic_reasoner.get_edge_index().to(outputs["phase_skeleton_part_coords"].device),
-                    has_skeleton=outputs.get("has_skeleton"),
-                )
-                losses["kinematic_length"] = length_reg
-                total = total + kinematic_length_weight * length_reg
-            if self.use_kinematic_chain and kinematic_symmetry_weight > 0:
-                symmetry_reg = kinematic_chain_symmetry_loss(
-                    outputs["phase_skeleton_part_velocity"],
-                    self.kinematic_reasoner.get_symmetry_pairs(),
-                    has_skeleton=outputs.get("has_skeleton"),
-                )
-                losses["kinematic_symmetry"] = symmetry_reg
-                total = total + kinematic_symmetry_weight * symmetry_reg
+        if self.use_kinematic_chain and kinematic_length_weight > 0 and "phase_skeleton_part_coords" in outputs:
+            length_reg = kinematic_chain_length_loss(
+                outputs["phase_skeleton_part_coords"],
+                self.kinematic_reasoner.get_edge_index().to(outputs["phase_skeleton_part_coords"].device),
+                has_skeleton=outputs.get("has_skeleton"),
+            )
+            losses["kinematic_length"] = length_reg
+            total = total + kinematic_length_weight * length_reg
 
         losses["total"] = total
         return losses

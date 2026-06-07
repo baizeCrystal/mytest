@@ -1,4 +1,3 @@
-import math
 from typing import Dict, List, Optional, Sequence
 
 import torch
@@ -265,42 +264,3 @@ class PhaseAwarePartPrototypeAggregator(nn.Module):
 
     def get_part_slot_names(self) -> List[str]:
         return list(self.part_slot_names)
-
-
-def part_slot_diversity_loss(part_tokens: torch.Tensor) -> torch.Tensor:
-    if part_tokens.ndim != 4:
-        raise ValueError(f"Expected [B, K, P, C], got {tuple(part_tokens.shape)}")
-    normalized = F.normalize(part_tokens, dim=-1)
-    sim = torch.einsum("bkpc,bkqc->bkpq", normalized, normalized)
-    eye = torch.eye(sim.shape[-1], device=sim.device, dtype=torch.bool).view(1, 1, sim.shape[-1], sim.shape[-1])
-    off_diag = sim.masked_select(~eye)
-    return off_diag.pow(2).mean()
-
-
-def part_slot_entropy_loss(part_attn: torch.Tensor) -> torch.Tensor:
-    if part_attn.ndim != 6:
-        raise ValueError(f"Expected [B, K, P, T, H, W], got {tuple(part_attn.shape)}")
-    attn = part_attn.flatten(-3)
-    attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-    entropy = -(attn * attn.clamp_min(1e-8).log()).sum(dim=-1)
-    normalizer = math.log(attn.shape[-1]) if attn.shape[-1] > 1 else 1.0
-    return (entropy / normalizer).mean()
-
-
-def part_slot_consistency_loss(part_attn: torch.Tensor) -> torch.Tensor:
-    if part_attn.ndim != 6:
-        raise ValueError(f"Expected [B, K, P, T, H, W], got {tuple(part_attn.shape)}")
-
-    spatial_attn = part_attn.sum(dim=3)
-    spatial_attn = spatial_attn / spatial_attn.sum(dim=(-1, -2), keepdim=True).clamp_min(1e-6)
-
-    height, width = spatial_attn.shape[-2:]
-    ys = torch.linspace(0.0, 1.0, steps=height, device=part_attn.device, dtype=part_attn.dtype)
-    xs = torch.linspace(0.0, 1.0, steps=width, device=part_attn.device, dtype=part_attn.dtype)
-    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
-
-    centroid_x = (spatial_attn * xx).sum(dim=(-1, -2))
-    centroid_y = (spatial_attn * yy).sum(dim=(-1, -2))
-    centroids = torch.stack([centroid_x, centroid_y], dim=-1)
-    mean_centroids = centroids.mean(dim=1, keepdim=True)
-    return (centroids - mean_centroids).pow(2).sum(dim=-1).mean()

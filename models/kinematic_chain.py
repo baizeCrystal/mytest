@@ -1,50 +1,9 @@
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-
-PART_CHAIN_EDGES: Dict[str, List[Tuple[int, int]]] = {
-    "full_body_7": [
-        (0, 1),
-        (1, 2),
-        (1, 3),
-        (1, 4),
-        (1, 5),
-        (4, 6),
-        (5, 6),
-    ],
-    "lower_body_6": [
-        (0, 1),
-        (0, 2),
-        (0, 3),
-        (1, 4),
-        (1, 5),
-    ],
-}
-
-PART_SYMMETRY_PAIRS: Dict[str, List[Tuple[int, int]]] = {
-    "full_body_7": [(2, 3), (4, 5)],
-    "lower_body_6": [(2, 3), (4, 5)],
-}
-
-
-def resolve_chain_edges(num_parts: int, slot_preset: str) -> List[Tuple[int, int]]:
-    if slot_preset in PART_CHAIN_EDGES:
-        edges = [edge for edge in PART_CHAIN_EDGES[slot_preset] if edge[0] < num_parts and edge[1] < num_parts]
-        if edges:
-            return edges
-
-    edges = []
-    for part_idx in range(max(num_parts - 1, 0)):
-        edges.append((part_idx, part_idx + 1))
-    return edges
-
-
-def resolve_symmetry_pairs(num_parts: int, slot_preset: str) -> List[Tuple[int, int]]:
-    pairs = PART_SYMMETRY_PAIRS.get(slot_preset, [])
-    return [pair for pair in pairs if pair[0] < num_parts and pair[1] < num_parts]
+from .body_topology import resolve_chain_edges
 
 
 def build_chain_adjacency(num_parts: int, edges: Sequence[Tuple[int, int]]) -> torch.Tensor:
@@ -140,8 +99,6 @@ class KinematicChainReasoner(nn.Module):
         edges = resolve_chain_edges(self.num_parts, self.slot_preset)
         if not edges:
             edges = [(0, 0)]
-        self.num_edges = len(edges)
-        self.symmetry_pairs = resolve_symmetry_pairs(self.num_parts, self.slot_preset)
 
         adjacency = build_chain_adjacency(self.num_parts, edges)
         incidence = build_edge_incidence(self.num_parts, edges)
@@ -183,6 +140,25 @@ class KinematicChainReasoner(nn.Module):
     ):
         if rgb_part_tokens.ndim != 4:
             raise ValueError(f"Expected rgb part tokens [B, K, P, C], got {tuple(rgb_part_tokens.shape)}")
+        if part_coords.ndim != 4 or part_velocity.ndim != 4:
+            raise ValueError(
+                "Expected part coordinates and velocities as [B, K, P, D], "
+                f"got coords={tuple(part_coords.shape)} velocity={tuple(part_velocity.shape)}"
+            )
+        if part_coords.shape != part_velocity.shape:
+            raise ValueError(
+                f"Coordinate/velocity shape mismatch: coords={tuple(part_coords.shape)} "
+                f"velocity={tuple(part_velocity.shape)}"
+            )
+        if part_coords.shape[:3] != rgb_part_tokens.shape[:3]:
+            raise ValueError(
+                f"Part-token / kinematic shape mismatch: tokens={tuple(rgb_part_tokens.shape)} "
+                f"coords={tuple(part_coords.shape)}"
+            )
+        if part_coords.shape[-1] != self.coord_dim:
+            raise ValueError(
+                f"Expected kinematic coordinate dim {self.coord_dim}, got {part_coords.shape[-1]}"
+            )
 
         speed = torch.linalg.norm(part_velocity, dim=-1, keepdim=True)
         node_features = rgb_part_tokens + self.motion_proj(torch.cat([part_coords, part_velocity, speed], dim=-1))
@@ -215,17 +191,10 @@ class KinematicChainReasoner(nn.Module):
 
         return {
             "phase_kinematic_features": phase_kinematic_features,
-            "kinematic_node_features": node_features,
-            "kinematic_edge_features": edge_features,
-            "kinematic_edge_lengths": edge_length,
-            "kinematic_edge_speed": edge_speed,
         }
 
     def get_edge_index(self) -> torch.Tensor:
         return self.chain_edge_index.detach().clone()
-
-    def get_symmetry_pairs(self) -> List[Tuple[int, int]]:
-        return list(self.symmetry_pairs)
 
 
 def _masked_average(per_sample: torch.Tensor, has_skeleton: Optional[torch.Tensor]) -> torch.Tensor:
@@ -252,22 +221,4 @@ def kinematic_chain_length_loss(
     edge_vectors = part_coords[:, :, src_idx] - part_coords[:, :, dst_idx]
     edge_lengths = torch.linalg.norm(edge_vectors, dim=-1)
     per_sample = edge_lengths.var(dim=1, unbiased=False).mean(dim=-1)
-    return _masked_average(per_sample, has_skeleton)
-
-
-def kinematic_chain_symmetry_loss(
-    part_velocity: torch.Tensor,
-    symmetry_pairs: Sequence[Tuple[int, int]],
-    has_skeleton: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    if part_velocity.ndim != 4:
-        raise ValueError(f"Expected phase part velocity [B, K, P, D], got {tuple(part_velocity.shape)}")
-    if not symmetry_pairs:
-        return part_velocity.sum() * 0.0
-
-    left_idx = torch.tensor([pair[0] for pair in symmetry_pairs], device=part_velocity.device, dtype=torch.long)
-    right_idx = torch.tensor([pair[1] for pair in symmetry_pairs], device=part_velocity.device, dtype=torch.long)
-    left_speed = torch.linalg.norm(part_velocity[:, :, left_idx], dim=-1)
-    right_speed = torch.linalg.norm(part_velocity[:, :, right_idx], dim=-1)
-    per_sample = (left_speed - right_speed).abs().mean(dim=(1, 2))
     return _masked_average(per_sample, has_skeleton)
